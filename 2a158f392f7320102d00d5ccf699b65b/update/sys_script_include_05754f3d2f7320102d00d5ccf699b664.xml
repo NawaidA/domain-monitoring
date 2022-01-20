@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_10255_domain_mon.createAlertandObs</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <name>createAlertandObs</name>
+        <script><![CDATA[var createAlertandObs = Class.create();
+createAlertandObs.prototype = {
+    initialize: function() {},
+
+    getNewMaliciousAst: function() {
+        var requestBody;
+        var parseBody;
+        var current_page = 1;
+        var host = gs.getProperty('x_ingmb_domain_mon.domain_get_endpoint');
+        var token = gs.getProperty('x_ingmb_domain_mon.token');
+        var malicious_score = gs.getProperty('x_ingmb_domain_mon.domain_malicious_score');
+        try {
+            var r = new sn_ws.RESTMessageV2('x_ingmb_domain_mon.ING CyberSprint malicious', 'GET malicious');
+            r.setStringParameterNoEscape('token', token);
+            r.setStringParameterNoEscape('current_page', current_page);
+            r.setStringParameterNoEscape('host', host);
+            r.setStringParameterNoEscape('malicious_score', malicious_score);
+            var response = r.execute();
+            var responseBody = response.getBody();
+            var httpStatus = response.getStatusCode();
+
+            if (httpStatus == 200) {
+                this.processMaliciousResponse(responseBody, "getNewMaliciousAst");
+            }
+        } catch (ex) {
+            var message = ex.message;
+            gs.error("Error info :  " + message);
+        }
+    },
+
+
+    processMaliciousResponse: function(responseBody, functionName) {
+        try {
+            parseBody = JSON.parse(responseBody);
+
+            gs.debug("Total updates : " + parseBody.count);
+
+            var Obs = new GlideRecord('sn_ti_observable');
+            var alert = new GlideRecord('sn_si_incident');
+            var securityTag = new GlideRecord('sn_sec_cmn_security_tag');
+            securityTag.get('name', 'CyberSprint - Potential Malicious');
+            var tag = new GlideRecord("sn_sec_cmn_applied_security_tag");
+
+            for (var i = 0; i < parseBody.results.length; i += 1) {
+                var obser = new GlideRecord('sn_ti_observable');
+                obser.addQuery('value', parseBody.results[i].fqdn);
+                obser.query();
+
+                if (obser.next()) {
+                    Obs = obser;
+					tag.initialize();
+                    tag.security_tag = securityTag.sys_id + '';
+                    tag.record_id = Obs.sys_id + '';
+                    tag.record_table = "sn_ti_observable";
+                    tag.insert();
+                    gs.debug("Observable already present " + Obs.value);
+                } else {
+                    Obs.initialize();
+                    Obs.value = parseBody.results[i].fqdn;
+                    Obs.finding = "Malicious";
+                    Obs.insert();
+                    gs.debug("Observable created: " + Obs.value);
+                    tag.initialize();
+                    tag.security_tag = securityTag.sys_id + '';
+                    tag.record_id = Obs.sys_id + '';
+                    tag.record_table = "sn_ti_observable";
+                    tag.insert();
+                }
+
+                try {
+
+                    var st = parseBody.results[i];
+                    gs.debug("Statement formatted" + JSON.stringify(st, 'null', ' '));
+					var obstask = new GlideRecord('sn_ti_m2m_task_observable');
+					obstask.addQuery('observable.value',parseBody.results[i].fqdn);// check for observable
+					obstask.addEncodedQuery('task.contact_type=Domain Monitoring'); // Check for source
+					obstask.query();
+					if(obstask.next())
+						{
+					gs.debug("Alert for the corresponding observable already present " + obstask.value);		
+						}
+					else{
+                    alert.initialize();
+                    alert.contact_type.setDisplayValue('Domain Monitoring');
+                    alert.alert_sensor.setDisplayValue('CyberSprint Domain Monitoring');
+                    alert.category.setDisplayValue('social_engineering');
+                    alert.subcategory.setDisplayValue('phishing_website');
+                    alert.state = 10;
+                    alert.substate = 24;
+                    alert.assignment_group.setDisplayValue('CERT Tech PL');
+                    alert.correlation_id = parseBody.results[i].id;
+                    alert.u_first_observed_at_occurence = parseBody.results[i].created_at;
+                    alert.short_description = "Domain Monitoring - potential malicious phishing domain - " + parseBody.results[i].fqdn;
+                    alert.description = "Potential Malicious link found: " + parseBody.results[i].fqdn + "\n" + "Source:  Cybersprint Domain Monitoring" + "\n" + "Malicious score: " + parseBody.results[i].malicious_score;
+                    alert.description += "\n" + "\n" + JSON.stringify(st, 'null', ' ');
+                    alert.insert();
+                    gs.debug("Alert created: " + alert.number);
+                    if (parseBody.results[i].screenshot_large_id != null) {
+                        this.getScreenshot(parseBody.results[i].screenshot_large_id, alert.getUniqueValue());
+                    }
+                    this.linkObservables(Obs.getUniqueValue(), alert.getUniqueValue());
+                    this.updateAsset(alert.getUniqueValue());
+                }} catch (ex) {
+                    gs.error("Error creating alert: " + ex.message);
+                }
+            }
+            this.current_page++;
+            if (parseBody.next != null) {
+                this.processMaliciousResponse();
+            }
+
+        } catch (err) {
+            parseBody = {
+                "error": "Unable to parse JSON"
+            };
+
+
+        }
+
+    },
+
+    getScreenshot: function(screenshot_id, alert) {
+        var host = gs.getProperty('x_ingmb_domain_mon.domain_get_endpoint');
+        var token = gs.getProperty('x_ingmb_domain_mon.token');
+        gs.debug("Starting download of screenshot: " + screenshot_id + " from host " + host);
+        try {
+            // Let's download the screenprint
+            var r = new sn_ws.RESTMessageV2('x_ingmb_domain_mon.ING CyberSprint screenshot', 'GET screenshot');
+            r.setStringParameterNoEscape('token', token);
+            r.setStringParameterNoEscape('host', host);
+            r.setStringParameterNoEscape('screenshot_id', screenshot_id);
+
+            // Configure the request to save the response as an attachment
+            r.saveResponseBodyAsAttachment('sn_si_incident', alert, 'screenshot_' + screenshot_id + ".jpeg");
+            var response = r.execute();
+            var httpStatus = response.getStatusCode();
+            gs.debug("Finished saving screenshot, status " + httpStatus);
+
+        } catch (ex) {
+            gs.error("Error to save screenshot: " + screenshot_id + " " + ex.message);
+        }
+
+    },
+
+    checkIfAttachmentExists: function(fileName, sirSysID) {
+        var attach = new GlideRecord('sys_attachment');
+        attach.addQuery('table_sys_id', '=', sirSysID);
+        attach.addQuery('file_name', fileName);
+
+        attach.query();
+
+        return attach.hasNext();
+    },
+
+
+    linkObservables: function(Obs, alert) {
+        try {
+            var observableIncident = new GlideRecord('sn_ti_m2m_task_observable');
+            observableIncident.initialize();
+            observableIncident.observable = Obs;
+            observableIncident.task = alert;
+            observableIncident.insert();
+            gs.debug("task obs : " + observableIncident.sys_id);
+        } catch (ex) {
+            var message = ex.message;
+            gs.error(message);
+        }
+    },
+    updateAsset: function(alert) {
+        var sm;
+        var state;
+        gs.debug("updateAsset" + alert);
+        var host = gs.getProperty('x_ingmb_domain_mon.domain_get_endpoint');
+        var token = gs.getProperty('x_ingmb_domain_mon.token');
+        var SIR = new GlideRecord('sn_si_incident');
+        SIR.get(alert);
+        var correlation_id = SIR.getValue('correlation_id');
+        var body = {};
+        body["state"] = "Unconfirmed";
+
+        try {
+            var r = new sn_ws.RESTMessageV2('x_ingmb_domain_mon.ING CyberSprint unconfirmed', 'Update unconfirmed');
+            r.setStringParameterNoEscape('token', token);
+            r.setStringParameterNoEscape('correlation_id', correlation_id);
+            r.setStringParameterNoEscape('host', host);
+
+            var response = r.execute();
+            var responseBody = response.getBody();
+            var httpStatus = response.getStatusCode();
+        } catch (ex) {
+            var message = ex.message;
+        }
+
+        if (httpStatus == '200') {
+            gs.debug('Successful Update.' + correlation_id + responseBody);
+        } else {
+            gs.error('Error making update.' + correlation_id + 'Status - ' + status + 'Body - ' + JSON.stringify(body) + 'Response - ' + responseBody);
+        }
+    },
+
+    type: 'createAlertandObs'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>nawaid.anjum</sys_created_by>
+        <sys_created_on>2021-04-29 14:09:39</sys_created_on>
+        <sys_id>05754f3d2f7320102d00d5ccf699b664</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>createAlertandObs</sys_name>
+        <sys_package display_value="Domain monitoring" source="x_10255_domain_mon">2a158f392f7320102d00d5ccf699b65b</sys_package>
+        <sys_policy>read</sys_policy>
+        <sys_scope display_value="Domain monitoring">2a158f392f7320102d00d5ccf699b65b</sys_scope>
+        <sys_update_name>sys_script_include_05754f3d2f7320102d00d5ccf699b664</sys_update_name>
+        <sys_updated_by>nawaid.anjum</sys_updated_by>
+        <sys_updated_on>2021-04-29 14:09:39</sys_updated_on>
+    </sys_script_include>
+</record_update>
